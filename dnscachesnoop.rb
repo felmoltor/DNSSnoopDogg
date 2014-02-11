@@ -200,6 +200,7 @@ def printBanner
     puts "#     Author: Felipe Molina (@felmoltor)      #".cyan
     puts "#          Date: February 2014                #".cyan
     puts "# Summary: Time Based DNS Cache Snooping Tool #".cyan
+    puts "#         Development Status: BETA            #".cyan
     puts "###############################################".cyan
     puts 
 end
