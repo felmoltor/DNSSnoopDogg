@@ -12,16 +12,18 @@
 #           * Checking the RTT of a packet to the server and compare with the time of the DNS query.
 
 require 'colorize'
-require 'resolv'
+# require 'resolv'
+require 'net/dns'
 require 'optparse'
 
 #######
 
 class DNSSnooper
-    def initialize(server=nil,timetreshold=nil)
+    def initialize(server=nil,recursive=false,timetreshold=nil)
         @@baselineIterations = 3
         @@thresholdFactor = 0.25 # This factor is used to avoid falses positives produced by network issues
-        @dnsserver = Resolv::DNS.new(:nameserver=>server)
+        # @dnsserver = Resolv::DNS.new(:nameserver=>server)
+        @dnsserver = Net::DNS::Resolver.new(:nameservers => server,:recursive=>recursive)
         if !timetreshold.nil?
             @ctreshold = timetreshold
         end
@@ -45,9 +47,8 @@ class DNSSnooper
         domain += ".com"
         nctime = time do
             begin
-                answer = @dnsserver.getaddress(domain)
-                puts answer
-            rescue Resolv::ResolvError => re
+                answer = @dnsserver.query(domain)
+            rescue Exception => re
                 puts "Error: #{re.message}"
             end
         end
@@ -62,8 +63,8 @@ class DNSSnooper
         # will be faster as it is already cached in the DNS.
         ctime = time do 
             begin
-                @dnsserver.getaddress(domain)
-            rescue Resolv::ResolvError => re
+                @dnsserver.query(domain)
+            rescue Exception => re
                 puts "Error: #{re.message}"
             end
         end
@@ -102,9 +103,9 @@ class DNSSnooper
         # Query with dns
         answertime = time do
             begin
-                answer = @dnsserver.getaddress(domain)
+                answer = @dnsserver.query(domain)
             rescue Resolv::ResolvError => e
-
+                $stderr.puts "Error: #{e.message}"
             end
         end
         # get the time of the response
@@ -128,7 +129,7 @@ def parseOptions
   # This hash will hold all of the options
   # parsed from the command-line by
   # OptionParser.
-  options = {:dnsfile => nil, :dnsserver=>nil, :domainsfile => nil, :domain=>nil, :output=>nil, :timetreshold => 15, :warn => true}
+  options = {:dnsfile => nil, :dnsserver=>nil, :domainsfile => nil, :domain=>nil, :output=>nil, :method =>"R", :warn => true}
   
   optparse = OptionParser.new do |opts|
     opts.on( '-D', '--dns-file FILE', 'File with the list of DNS servers to test') do |file|
@@ -143,11 +144,11 @@ def parseOptions
     opts.on( '-q', '--query DOMAIN', 'Single domain name to test on targets DNS servers') do |domain|
       options[:domain] = domain
     end
+    opts.on( '-m', '--method [METHOD]', 'Snoop method to use (R: Recursion based, T: TTL based, RT: Response Time based)') do |method|
+      options[:method] = method
+    end
     opts.on( '-o', '--out [FILE]', 'File name where to save the results in csv format') do |output|
       options[:output] = output
-    end
-    opts.on( '-t', '--threshold [TIME]', 'Force a time threshold to consider a domain is cached in the DNS server (Default is computed dynamicaly)' ) do |threshold|
-      options[:threshold] = threshold
     end
     opts.on( '--[no-]warn-me', 'Don\'t show me the warning, I already know everything about DNS Snooping') do |warn|
       options[:warn] = warn
@@ -264,7 +265,11 @@ end
 
 dnsservers.each{ |dns|
     snoopresults[dns] = {}
-    snooper = DNSSnooper.new(dns,options[:timethreshold])
+    if options[:method] == "R"
+        snooper = DNSSnooper.new(dns,false,options[:timethreshold])
+    else
+        snooper = DNSSnooper.new(dns,true,options[:timethreshold])
+    end
     puts
     puts "Recolecting response times from #{dns}"
     cachedth,noncachedth = snooper.obtainDNSThresholds
