@@ -3,6 +3,8 @@ DNS Cache Snoop
 
 * Author: Felipe Molina (@felmoltor)
 * Date: February 2014
+* Summary: Time Based DNS Cache Snooping Tool
+* Dev. Status. BETA
 
 Intro
 -----
