@@ -4,6 +4,13 @@
 # This method is the so called "DNS Cache Snooping". This snooping it's focused on response time.
 # As there is some problems with dns-cache-snoop script of nmap and DNS Snoopy, I decided to write my own DNS Cache Snooping tool.
 
+# TODO: Non polluting way: Use snooping technique with +norecurse (RD set to 0) in the query.
+#       If the DNS server has the domain in its chache, it will answer you with the information needed, if not
+#       it will answer you with an authority section.
+# TODO: Polluting ways:
+#           * Checking the TTL compared with the autoritative server of this domain. If it is a very low TTL compared with the autoritative DNS, it was cached some time ago by the target DNS.
+#           * Checking the RTT of a packet to the server and compare with the time of the DNS query.
+
 require 'colorize'
 require 'resolv'
 require 'optparse'
@@ -38,7 +45,8 @@ class DNSSnooper
         domain += ".com"
         nctime = time do
             begin
-                @dnsserver.getaddress(domain)
+                answer = @dnsserver.getaddress(domain)
+                puts answer
             rescue Resolv::ResolvError => re
                 puts "Error: #{re.message}"
             end
@@ -68,7 +76,7 @@ class DNSSnooper
     def obtainDNSThresholds
         # TODO: Change the testing domain if it is in the domain list the user provided
         maxcached = 0.0
-        avgnoncached = 0.0
+        minnoncached = 9999.0
         d = "www.google.com"
 
         @@baselineIterations.times {
@@ -77,13 +85,15 @@ class DNSSnooper
             if maxcached < cachedth
                 maxcached = cachedth
             end
-            avgnoncached += noncachedth
+            if minnoncached > noncachedth
+                minnoncached = noncachedth
+            end
         }
         # Save the computed threshold times if there is not setted by the user
         if @cthreshold.nil?
             @cthreshold =  maxcached
         end
-        return maxcached*1000,(avgnoncached/@@baselineIterations)*1000
+        return maxcached*1000,minnoncached*1000
     end
      
     ##############
@@ -185,6 +195,17 @@ end
 
 ###########
 
+def printBanner
+    puts "###############################################".cyan
+    puts "#     Author: Felipe Molina (@felmoltor)      #".cyan
+    puts "#          Date: February 2014                #".cyan
+    puts "# Summary: Time Based DNS Cache Snooping Tool #".cyan
+    puts "###############################################".cyan
+    puts 
+end
+
+##########
+
 def printWarning
     puts
     puts "**********************************************************************************************"
@@ -209,6 +230,7 @@ end
 # MAIN #
 ########
 
+printBanner
 options = parseOptions
 if options[:warn]
     printWarning
@@ -250,9 +272,13 @@ dnsservers.each{ |dns|
     puts ":"
     print "- Max. response time for cached entries: "
     puts "#{cachedth.round(2)}ms".bold
-    print "- Avg. response time for non cached entries: "
+    print "- Min. response time for non cached entries: "
     puts "#{noncachedth.round(2)}ms".bold
+    if (cachedth >= noncachedth)
+        puts "Those values are strange. They are inversed. Maybe the following results are not very reliable...".red
+    end
     puts
+
     domains.each {|domain|
         print "* "
         print "#{domain}".bold
