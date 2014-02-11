@@ -4,7 +4,6 @@
 # This method is the so called "DNS Cache Snooping". This snooping it's focused on response time.
 # As there is some problems with dns-cache-snoop script of nmap and DNS Snoopy, I decided to write my own DNS Cache Snooping tool.
 
-require 'pp'
 require 'colorize'
 require 'resolv'
 require 'optparse'
@@ -159,6 +158,25 @@ end
 
 ###########
 
+def saveResults(ofile,results)
+    f = File.open(ofile,"w")
+
+    header = ";#{results.keys.join(";")};"
+    f.puts(header)
+    # Iterate through explored domains
+    results.values[0].keys.each{ |domain|
+        line = "#{domain};"
+        results.keys.each{|dns|
+            line += "VISITED;" if results[dns][domain]
+            line += "NOT VISITED;" if !results[dns][domain]
+        }
+        f.puts(line)
+    }
+    f.close
+end
+
+###########
+
 def printWarning
     puts
     puts "**********************************************************************************************"
@@ -227,7 +245,8 @@ dnsservers.each{ |dns|
     puts "#{noncachedth.round(2)}ms".bold
     puts
     domains.each {|domain|
-        print "Checking domain #{domain}"
+        print "* "
+        print "#{domain}".bold
         if snooper.isCached?(domain)
             snoopresults[dns][domain] = true
             puts " [VISITED]".green
@@ -238,10 +257,12 @@ dnsservers.each{ |dns|
     }
 }
 
-puts
-puts "#################"
-puts "# SNOOP RESULTS #"
-puts "#################"
+if !options[:output].nil?
+    puts
+    puts "Saving the results in #{options[:output]}..."
+    saveResults(options[:output],snoopresults)
+end
 
-pp snoopresults
-puts 
+puts "Snooping finished."
+puts "Please, wait some time until execute the snooping again to avoid the false positives produced by your own queries".red
+puts
