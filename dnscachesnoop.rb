@@ -13,6 +13,7 @@ require 'optparse'
 class DNSSnooper
     def initialize(server=nil,timetreshold=nil)
         @@baselineIterations = 3
+        @@thresholdFactor = 0.25 # This factor is used to avoid falses positives produced by network issues
         @dnsserver = Resolv::DNS.new(:nameserver=>server)
         if !timetreshold.nil?
             @ctreshold = timetreshold
@@ -39,7 +40,7 @@ class DNSSnooper
             begin
                 @dnsserver.getaddress(domain)
             rescue Resolv::ResolvError => re
-                  
+                puts "Error: #{re.message}"
             end
         end
         return nctime
@@ -51,9 +52,12 @@ class DNSSnooper
         # This function obtain the average time takes for a server to answer you with a cached entry.
         # It request twice the same existent domain to a server. The second time we request it, it answer
         # will be faster as it is already cached in the DNS.
-        @dnsserver.getaddress(domain)
         ctime = time do 
-            @dnsserver.getaddress(domain)
+            begin
+                @dnsserver.getaddress(domain)
+            rescue Resolv::ResolvError => re
+                puts "Error: #{re.message}"
+            end
         end
         return ctime
     end
@@ -77,7 +81,7 @@ class DNSSnooper
         }
         # Save the computed threshold times if there is not setted by the user
         if @cthreshold.nil?
-            @cthreshold =  maxcached*1000
+            @cthreshold =  maxcached
         end
         return maxcached*1000,(avgnoncached/@@baselineIterations)*1000
     end
@@ -94,7 +98,11 @@ class DNSSnooper
             end
         end
         # get the time of the response
-        if answertime <= @cthreshold
+        #puts "Comparando:"
+        #puts "Answertime #{answertime}"
+        #puts "Threshold: #{@cthreshold}"
+        #puts "Confidence threshold: #{@cthreshold+(@cthreshold*@@thresholdFactor)}"
+        if answertime <= @cthreshold+(@cthreshold*@@thresholdFactor)
             return true
         else
             return false
@@ -234,8 +242,9 @@ end
 dnsservers.each{ |dns|
     snoopresults[dns] = {}
     snooper = DNSSnooper.new(dns,options[:timethreshold])
-    cachedth,noncachedth = snooper.obtainDNSThresholds
     puts
+    puts "Recolecting response times from #{dns}"
+    cachedth,noncachedth = snooper.obtainDNSThresholds
     print "Obtained cached thresholds for server "
     print "#{dns}".bold
     puts ":"
