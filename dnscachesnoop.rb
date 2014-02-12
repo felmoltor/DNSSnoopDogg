@@ -1,5 +1,7 @@
 #!/usr/bin/env ruby
 
+# Some interesting documentation about it:
+#  * http://www.rootsecure.net/content/downloads/pdf/dns_cache_snooping.pdf
 # This tools allows you to query a list of DNS servers for a list of domains and check if there is a recent visit of this domain in their cache.
 # This method is the so called "DNS Cache Snooping". This snooping it's focused on response time.
 # As there is some problems with dns-cache-snoop script of nmap and DNS Snoopy, I decided to write my own DNS Cache Snooping tool.
@@ -12,18 +14,25 @@
 #           * Checking the RTT of a packet to the server and compare with the time of the DNS query.
 
 require 'colorize'
-# require 'resolv'
 require 'net/dns'
 require 'optparse'
 
 #######
 
 class DNSSnooper
-    def initialize(server=nil,recursive=false,timetreshold=nil)
+    def initialize(server=nil,method="R",timetreshold=nil)
         @@baselineIterations = 3
         @@thresholdFactor = 0.25 # This factor is used to avoid falses positives produced by network issues
-        # @dnsserver = Resolv::DNS.new(:nameserver=>server)
-        @dnsserver = Net::DNS::Resolver.new(:nameservers => server,:recursive=>recursive)
+        @@ttlFactor = 0.7 # If the TTL of the targeted DNS is a X% smaller than the authoritative TTL, the domain was probably cached
+        @method = method 
+        @dnsserver = Net::DNS::Resolver.new(:nameservers => server)
+        @dnsserver.domain = "" # Avoid leaking local config of /etc/resolv.conf
+        @dnsserver.searchlist = "" # Avoid leaking local config of /etc/resolv.conf
+        if @method == "R"
+            @dnsserver.recurse = false
+        else
+            @dnsserver.recurse = true
+        end
         if !timetreshold.nil?
             @ctreshold = timetreshold
         end
@@ -70,6 +79,24 @@ class DNSSnooper
         end
         return ctime
     end
+
+    ##############
+
+    def getAuthoritativeTTL(domain)
+        googledns = Net::DNS::Resolver.new(:nameservers => "8.8.8.8",:searchlist=>[],:domain=>[])
+        authDNSs = googledns.query(domain,Net::DNS::NS)
+        authDNSs.answer.each{|dns|
+            # Get the IP of this authdns and set it as our new DNS resolver
+            dnsaddress = googledns.query(dns.nsdname,Net::DNS::A).answer[0].address.to_s
+            authdns = Net::DNS::Resolver.new(:nameservers => dnsaddress,:searchlist=>[],:domain=>[])
+            authresponse = authdns.query(domain)
+            if authresponse.header.auth?
+                # This response is authoritative and we have a valid TTL
+                return authresponse.answer[0].ttl
+            end
+        }
+        return nil
+    end
      
     ##############
     
@@ -100,24 +127,53 @@ class DNSSnooper
     ##############
     
     def isCached?(domain)
-        # Query with dns
-        answertime = time do
+        whenWasCached = 0
+        isCached = false
+        case @method
+        when "R"
+            # Query with non-recurse bit 
             begin
-                answer = @dnsserver.query(domain)
-            rescue Resolv::ResolvError => e
+                dnsr = @dnsserver.query(domain)
+            rescue Exception => e
                 $stderr.puts "Error: #{e.message}"
             end
+            # If the server has this entry cached, we will have an answer section
+            # If the server does not have this entry cached, we will have an autoritative redirection
+            if dnsr.answer.size > 0
+                whenWasCached = dnsr.answer[0].ttl
+                isCached = true
+            end
+        when "T"
+            # If the TTL of the DNS is very low compared with the autoritative DNS TTL for this domain
+            # It is very likely that this domain was cached some time ago.
+            # If the TTL y equal or almost equal to the autoritative DNS TTL, it is probable that the
+            # targeted DNS server just requested this information to the autoritative DNS
+            authTTL = getAuthoritativeTTL(domain)
+            if !authTTL.nil?
+                puts "The authoritative TTL of this domain is #{authTTL}"
+                dnsr = @dnsserver.query(domain)
+                puts "The TTL of targeted DNS is #{dnsr.answer[0].ttl}"
+                if (dnsr.answer[0].ttl.to_f < (@@ttlFactor * authTTL.to_f))
+                    whenWasCached = dnsr.answer[0].ttl
+                    isCached = true
+                end
+            end
+        when "RT"
+            # Query with dns
+            answertime = time do
+                begin
+                    dnsr = @dnsserver.query(domain)
+                rescue Exception => e
+                    $stderr.puts "Error: #{e.message}"
+                end
+            end
+            if answertime <= @cthreshold+(@cthreshold*@@thresholdFactor)
+                whenWasCached = dnsr.answer[0].ttl
+                isCached = true
+            end
         end
-        # get the time of the response
-        #puts "Comparando:"
-        #puts "Answertime #{answertime}"
-        #puts "Threshold: #{@cthreshold}"
-        #puts "Confidence threshold: #{@cthreshold+(@cthreshold*@@thresholdFactor)}"
-        if answertime <= @cthreshold+(@cthreshold*@@thresholdFactor)
-            return true
-        else
-            return false
-        end        
+
+        return isCached
     end
 end
 
@@ -144,7 +200,7 @@ def parseOptions
     opts.on( '-q', '--query DOMAIN', 'Single domain name to test on targets DNS servers') do |domain|
       options[:domain] = domain
     end
-    opts.on( '-m', '--method [METHOD]', 'Snoop method to use (R: Recursion based, T: TTL based, RT: Response Time based)') do |method|
+    opts.on( '-m', '--method [METHOD]', 'Snoop method to use (R: Recursion based, T: TTL based, RT: Response Time based. Default is "R")') do |method|
       options[:method] = method
     end
     opts.on( '-o', '--out [FILE]', 'File name where to save the results in csv format') do |output|
@@ -197,12 +253,12 @@ end
 ###########
 
 def printBanner
-    puts "###############################################".cyan
-    puts "#     Author: Felipe Molina (@felmoltor)      #".cyan
-    puts "#          Date: February 2014                #".cyan
-    puts "# Summary: Time Based DNS Cache Snooping Tool #".cyan
-    puts "#         Development Status: BETA            #".cyan
-    puts "###############################################".cyan
+    puts "####################################################".cyan
+    puts "#        Author: Felipe Molina (@felmoltor)        #".cyan
+    puts "#              Date: February 2014                 #".cyan
+    puts "# Summary: Multiple method DNS Cache Snooping Tool #".cyan
+    puts "#            Development Status: BETA              #".cyan
+    puts "####################################################".cyan
     puts 
 end
 
@@ -211,11 +267,15 @@ end
 def printWarning
     puts
     puts "**********************************************************************************************"
-    puts "* Remember that executing this tool, you will query to the targeted DNS servers for domains  *"
+    puts "* Remember that executing this tool with methods 'T' or 'RT', you will query to the targeted *"
+    puts "* DNS servers for domains.                                                                   *"
     puts "* The correctly resolved entries will be stored in the targeted DNS cache, so the subsequent *"
     puts "* executions of this script will produce false positives, telling you a domain is being      *"
     puts "* visited or requested by the users, when in fact the last person who requested the domain   *"
     puts "* was YOU executing this script.                                                             *"
+    puts "*                                                                                            *"
+    puts "* This wont happen with the method 'R', as the DNS server won't query other DNS servers if   *"
+    puts "* the domain is not already cached, thus, avoiding the cache pollution of the targeted DNS.  *"
     puts "*                                                                                            *"
     puts "* In other words: You have ONLY ONE chance to get the real cache status of a DNS server (the *"
     puts "* first execution). Then you will have to WAIT some time to get real results from DNS servers*"
