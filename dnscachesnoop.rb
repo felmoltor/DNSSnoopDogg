@@ -88,29 +88,73 @@ class DNSSnooper
             authDNSs = googledns.query(domain,Net::DNS::NS)
             authDNSs.answer.each{|dns|
                 # Get the IP of this authdns and set it as our new DNS resolver
-                dnsaddress = googledns.query(dns.nsdname,Net::DNS::A).answer[0].address.to_s
-                authdns = Net::DNS::Resolver.new(:nameservers => dnsaddress,:searchlist=>[],:domain=>[],:udp_timeout=>15)
-                authresponse = authdns.query(domain)
-                if authresponse.header.auth?
-                    if !authresponse.answer[0].nil?
-                        # This response is authoritative and we have a valid TTL
-                        return authresponse.answer[0].ttl
-                    elsif authresponse.authority.size > 0
-                        # If we get a SOA redirection
-                        # TODO:  Not sure how to handle this TTL from a SOA... Explore the protocol
-                        if authresponse.authority[0].class == Net::DNS::RR::SOA
-                            soadns = authresponse.authority[0].mname
-                            # Get the IP of the SOA mname and set it as our new dns resolver
-                            soaip = googledns.query(soadns,Net::DNS::A).answer[0].address.to_s
-                            soa = Net::DNS::Resolver.new(:nameservers => soaip,:searchlist=>[],:domain=>[],:udp_timeout=>15)
-                            soaresponse = soa.query(domain,Net::DNS::A)
-                            if !soaresponse.answer[0].nil?
-                                return soaresponse.answer[0].ttl
-                            elsif !soaresponse.authority[0].nil?
-                                return soaresponse.authority[0].ttl
+                # puts "DNS Class: #{dns.class}"
+                if dns.class == Net::DNS::RR::NS
+                    gresponse = googledns.query(dns.nsdname,Net::DNS::A)
+                    if (!gresponse.answer[0].nil?)
+                        dnsaddress = gresponse.answer[0].address.to_s
+                        authdns = Net::DNS::Resolver.new(:nameservers => dnsaddress,:searchlist=>[],:domain=>[],:udp_timeout=>15)
+                        authresponse = authdns.query(domain)
+                        if authresponse.header.auth?
+                            if !authresponse.answer[0].nil?
+                                # This response is authoritative and we have a valid TTL
+                                return authresponse.answer[0].ttl
+                            elsif authresponse.authority.size > 0
+                                # If we get a SOA redirection
+                                # TODO:  Not sure how to handle this TTL from a SOA... Explore the protocol
+                                if authresponse.authority[0].class == Net::DNS::RR::SOA
+                                    soadns = authresponse.authority[0].mname
+                                    # Get the IP of the SOA mname and set it as our new dns resolver
+                                    soaip = googledns.query(soadns,Net::DNS::A).answer[0].address.to_s
+                                    soa = Net::DNS::Resolver.new(:nameservers => soaip,:searchlist=>[],:domain=>[],:udp_timeout=>15)
+                                    soaresponse = soa.query(domain,Net::DNS::A)
+                                    if !soaresponse.answer[0].nil?
+                                        return soaresponse.answer[0].ttl
+                                    elsif !soaresponse.authority[0].nil?
+                                        return soaresponse.authority[0].ttl
+                                    else
+                                        return nil
+                                    end
+                                end
                             else
                                 return nil
                             end
+                        end
+                    else # If Google cannot find A records for this DNS server
+                        if !gresponse.authority[0].nil?
+                            if gresponse.authority[0].class == Net::DNS::RR::SOA
+                                soadns = gresponse.authority[0].mname
+                                # Get the IP of the SOA mname and set it as our new dns resolver
+                                soaip = googledns.query(soadns,Net::DNS::A).answer[0].address.to_s
+                                soa = Net::DNS::Resolver.new(:nameservers => soaip,:searchlist=>[],:domain=>[],:udp_timeout=>15)
+                                soaresponse = soa.query(domain,Net::DNS::A)
+                                if !soaresponse.answer[0].nil?
+                                    return soaresponse.answer[0].ttl
+                                elsif !soaresponse.authority[0].nil?
+                                    return soaresponse.authority[0].ttl
+                                else
+                                    return nil
+                                end
+                            else
+                                return nil
+                            end
+                        else
+                            return nil
+                        end
+                    end
+                else # This is not a DNS server but other type of record
+                    if dns == Net::DNS::RR::SOA
+                        soadns = dns.mname
+                        # Get the IP of the SOA mname and set it as our new dns resolver
+                        soaip = googledns.query(soadns,Net::DNS::A).answer[0].address.to_s
+                        soa = Net::DNS::Resolver.new(:nameservers => soaip,:searchlist=>[],:domain=>[],:udp_timeout=>15)
+                        soaresponse = soa.query(domain,Net::DNS::A)
+                        if !soaresponse.answer[0].nil?
+                            return soaresponse.answer[0].ttl
+                        elsif !soaresponse.authority[0].nil?
+                            return soaresponse.authority[0].ttl
+                        else
+                            return nil
                         end
                     else
                         return nil
@@ -184,9 +228,7 @@ class DNSSnooper
             # If the TTL y equal or almost equal to the autoritative DNS TTL, it is probable that the
             # targeted DNS server just requested this information to the autoritative DNS
             if !authTTL.nil?
-                puts "The authoritative TTL of this domain is #{authTTL}"
                 dnsr = @dnsserver.query(domain)
-                puts "The TTL of targeted DNS is #{dnsr.answer[0].ttl}"
                 if (dnsr.answer[0].ttl.to_f < (@@ttlFactor * authTTL.to_f))
                     timeToExpire = dnsr.answer[0].ttl
                     isCached = true
