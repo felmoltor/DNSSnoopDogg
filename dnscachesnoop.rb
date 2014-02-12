@@ -21,11 +21,11 @@ require 'optparse'
 
 class DNSSnooper
     def initialize(server=nil,method="R",timetreshold=nil)
-        @@baselineIterations = 3
+        @@baselineIterations = 4
         @@thresholdFactor = 0.25 # This factor is used to avoid falses positives produced by network issues
         @@ttlFactor = 0.7 # If the TTL of the targeted DNS is a X% smaller than the authoritative TTL, the domain was probably cached
         @method = method 
-        @dnsserver = Net::DNS::Resolver.new(:nameservers => server)
+        @dnsserver = Net::DNS::Resolver.new(:nameservers => server,:udp_timeout=>15)
         @dnsserver.domain = "" # Avoid leaking local config of /etc/resolv.conf
         @dnsserver.searchlist = "" # Avoid leaking local config of /etc/resolv.conf
         if @method == "R"
@@ -83,18 +83,45 @@ class DNSSnooper
     ##############
 
     def getAuthoritativeTTL(domain)
-        googledns = Net::DNS::Resolver.new(:nameservers => "8.8.8.8",:searchlist=>[],:domain=>[])
-        authDNSs = googledns.query(domain,Net::DNS::NS)
-        authDNSs.answer.each{|dns|
-            # Get the IP of this authdns and set it as our new DNS resolver
-            dnsaddress = googledns.query(dns.nsdname,Net::DNS::A).answer[0].address.to_s
-            authdns = Net::DNS::Resolver.new(:nameservers => dnsaddress,:searchlist=>[],:domain=>[])
-            authresponse = authdns.query(domain)
-            if authresponse.header.auth?
-                # This response is authoritative and we have a valid TTL
-                return authresponse.answer[0].ttl
-            end
-        }
+        begin
+            googledns = Net::DNS::Resolver.new(:nameservers => "8.8.8.8",:searchlist=>[],:domain=>[],:udp_timeout=>15)
+            authDNSs = googledns.query(domain,Net::DNS::NS)
+            authDNSs.answer.each{|dns|
+                # Get the IP of this authdns and set it as our new DNS resolver
+                dnsaddress = googledns.query(dns.nsdname,Net::DNS::A).answer[0].address.to_s
+                authdns = Net::DNS::Resolver.new(:nameservers => dnsaddress,:searchlist=>[],:domain=>[],:udp_timeout=>15)
+                authresponse = authdns.query(domain)
+                if authresponse.header.auth?
+                    if !authresponse.answer[0].nil?
+                        # This response is authoritative and we have a valid TTL
+                        return authresponse.answer[0].ttl
+                    elsif authresponse.authority.size > 0
+                        # If we get a SOA redirection
+                        # TODO:  Not sure how to handle this TTL from a SOA... Explore the protocol
+                        if authresponse.authority[0].class == Net::DNS::RR::SOA
+                            soadns = authresponse.authority[0].mname
+                            # Get the IP of the SOA mname and set it as our new dns resolver
+                            soaip = googledns.query(soadns,Net::DNS::A).answer[0].address.to_s
+                            soa = Net::DNS::Resolver.new(:nameservers => soaip,:searchlist=>[],:domain=>[],:udp_timeout=>15)
+                            soaresponse = soa.query(domain,Net::DNS::A)
+                            if !soaresponse.answer[0].nil?
+                                return soaresponse.answer[0].ttl
+                            elsif !soaresponse.authority[0].nil?
+                                return soaresponse.authority[0].ttl
+                            else
+                                return nil
+                            end
+                        end
+                    else
+                        return nil
+                    end
+                end
+            }
+        rescue Net::DNS::Resolver::NoResponseError => terror
+            puts "Error: #{terror.message}"
+            return nil
+        end
+
         return nil
     end
      
@@ -127,11 +154,17 @@ class DNSSnooper
     ##############
     
     def isCached?(domain)
-        whenWasCached = 0
-        isCached = false
+        timeToExpire = nil
+        whenWasCached = nil
+        isCached = nil
+        
+        # Obtain the authoritative TTL of the domain
+        authTTL = getAuthoritativeTTL(domain)
+        timeToExpire = authTTL
+        
         case @method
         when "R"
-            # Query with non-recurse bit 
+            # Query with non-recurse bit
             begin
                 dnsr = @dnsserver.query(domain)
             rescue Exception => e
@@ -140,26 +173,31 @@ class DNSSnooper
             # If the server has this entry cached, we will have an answer section
             # If the server does not have this entry cached, we will have an autoritative redirection
             if dnsr.answer.size > 0
-                whenWasCached = dnsr.answer[0].ttl
+                timeToExpire = dnsr.answer[0].ttl
                 isCached = true
+            else
+                isCached = false
             end
         when "T"
             # If the TTL of the DNS is very low compared with the autoritative DNS TTL for this domain
             # It is very likely that this domain was cached some time ago.
             # If the TTL y equal or almost equal to the autoritative DNS TTL, it is probable that the
             # targeted DNS server just requested this information to the autoritative DNS
-            authTTL = getAuthoritativeTTL(domain)
             if !authTTL.nil?
                 puts "The authoritative TTL of this domain is #{authTTL}"
                 dnsr = @dnsserver.query(domain)
                 puts "The TTL of targeted DNS is #{dnsr.answer[0].ttl}"
                 if (dnsr.answer[0].ttl.to_f < (@@ttlFactor * authTTL.to_f))
-                    whenWasCached = dnsr.answer[0].ttl
+                    timeToExpire = dnsr.answer[0].ttl
                     isCached = true
+                else 
+                    isCached = false
                 end
             end
         when "RT"
-            # Query with dns
+            # If the target DNS sever has the domain cached, the response time of it
+            # should be faster than a query for a non cached domain and similar to 
+            # a RTT of a ICMP packet
             answertime = time do
                 begin
                     dnsr = @dnsserver.query(domain)
@@ -168,12 +206,18 @@ class DNSSnooper
                 end
             end
             if answertime <= @cthreshold+(@cthreshold*@@thresholdFactor)
-                whenWasCached = dnsr.answer[0].ttl
+                timeToExpire = dnsr.answer[0].ttl
                 isCached = true
+            else
+                isCached = false
             end
         end
 
-        return isCached
+        if !authTTL.nil? and !timeToExpire.nil?
+            whenWasCached = authTTL - timeToExpire
+        end
+        
+        return isCached,timeToExpire,whenWasCached
     end
 end
 
@@ -288,6 +332,31 @@ def printWarning
     end
 end
 
+#############
+
+def toHumanTime(seconds)
+    humantime = ""
+
+    if seconds.to_i > 0
+        mm, ss = seconds.divmod(60)
+        hh, mm = mm.divmod(60) 
+        dd, hh = hh.divmod(24) 
+
+        ss = "0#{ss}" if (ss < 10)
+        mm = "0#{mm}" if (mm < 10)
+        hh = "0#{hh}" if (hh < 10)
+
+        if dd.to_i > 0
+            humantime += "#{dd} days, "
+        end
+        if hh.to_i > 0
+            humantime += "#{hh}:"
+        end
+        humantime += "#{mm}:#{ss}"
+    end
+    return humantime
+end
+
 ########
 # MAIN #
 ########
@@ -325,11 +394,7 @@ end
 
 dnsservers.each{ |dns|
     snoopresults[dns] = {}
-    if options[:method] == "R"
-        snooper = DNSSnooper.new(dns,false,options[:timethreshold])
-    else
-        snooper = DNSSnooper.new(dns,true,options[:timethreshold])
-    end
+    snooper = DNSSnooper.new(dns,options[:method],options[:timethreshold])
     puts
     puts "Recolecting response times from #{dns}"
     cachedth,noncachedth = snooper.obtainDNSThresholds
@@ -340,7 +405,7 @@ dnsservers.each{ |dns|
     puts "#{cachedth.round(2)}ms".bold
     print "- Min. response time for non cached entries: "
     puts "#{noncachedth.round(2)}ms".bold
-    if (cachedth >= noncachedth)
+    if (cachedth >= noncachedth and options[:method] == "RT")
         puts "Those values are strange. They are inversed. Maybe the following results are not very reliable...".red
     end
     puts
@@ -348,12 +413,20 @@ dnsservers.each{ |dns|
     domains.each {|domain|
         print "* "
         print "#{domain}".bold
-        if snooper.isCached?(domain)
-            snoopresults[dns][domain] = true
-            puts " [VISITED]".green
+        isCached,timeToExpire,whenWasCached = snooper.isCached?(domain)
+
+        if isCached.nil?
+            puts " [UNKNOWN]".yellow
         else
-            snoopresults[dns][domain] = false
-            puts " [NOT VISITED]".red
+            if isCached
+                snoopresults[dns][domain] = true
+                print " [VISITED]".green
+                puts " (Cached #{toHumanTime(whenWasCached)} ago, Time To Expire #{toHumanTime(timeToExpire)})"
+            else
+                snoopresults[dns][domain] = false
+                print " [NOT VISITED]".red
+                puts " (In the last #{toHumanTime(timeToExpire)})"
+            end
         end
     }
 }
@@ -364,6 +437,9 @@ if !options[:output].nil?
     saveResults(options[:output],snoopresults)
 end
 
+puts
 puts "Snooping finished."
-puts "Please, wait some time until execute the snooping again to avoid the false positives produced by your own queries".red
+print "If you used techniques 'T' or 'RT', "
+print "wait some time ".red
+puts "until execute the snooping again to avoid the false positives produced by your own queries"
 puts
