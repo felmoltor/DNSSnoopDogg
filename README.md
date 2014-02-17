@@ -1,9 +1,9 @@
-DNS Cache Snoop
+DNS Snoop Dogg 
 ===============
 
 * Author: Felipe Molina (@felmoltor)
 * Date: February 2014
-* Summary: Time Based DNS Cache Snooping Tool
+* Summary: DNS Cache Snooping Tool (Recursion Desired Bit, TTL and Response Time based)
 * Dev. Status. BETA
 * Video Demonstration: https://www.youtube.com/watch?v=6VVZJV3wbi8
 
@@ -29,7 +29,7 @@ Usage
 -----
 
 ```
-age: dnscachesnoop [options]
+Usage: dnssnoopdogg [options]
     -D, --dns-file FILE              File with the list of DNS servers to test
     -d, --dns SERVER                 Single server IP or name of the DNS to test
     -Q, --queries-file FILE          File with the list of domain names to snoop on the target DNS servers
