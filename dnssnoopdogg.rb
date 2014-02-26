@@ -52,8 +52,8 @@ class DNSSnooper
 
     def baselineRequestNonCached
         # Generate a random non existent domain and query it to the target DNS
-        domain = (0...10).map { (65 + rand(26)).chr }.join.downcase
-        domain += ".com"
+        domain = (0...8).map { (65 + rand(26)).chr }.join.downcase
+        domain += ".google.com"
         nctime = time do
             begin
                 answer = @dnsserver.query(domain)
